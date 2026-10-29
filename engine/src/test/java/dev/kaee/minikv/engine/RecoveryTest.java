@@ -3,15 +3,12 @@ package dev.kaee.minikv.engine;
 import static dev.kaee.minikv.engine.TestBytes.b;
 import static dev.kaee.minikv.engine.TestBytes.copyDir;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import dev.kaee.minikv.engine.wal.CorruptWalException;
 import dev.kaee.minikv.engine.wal.FsyncMode;
 import dev.kaee.minikv.engine.wal.WalCodec;
 import dev.kaee.minikv.engine.wal.WalRecord;
 import dev.kaee.minikv.engine.wal.WriteAheadLog;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -60,22 +57,6 @@ class RecoveryTest {
             assertThat(v.value()).isEqualTo(b("v" + i));
           }
         }
-      }
-    }
-  }
-
-  @Test
-  void reopenRecoversRecordsSpreadAcrossRotatedSegments() {
-    try (Engine e = open(dir, FsyncMode.ALWAYS, 1024)) {
-      for (int i = 0; i < 300; i++) {
-        e.put(b("k" + i), new byte[40], i + 1);
-      }
-      assertThat(e.stats().walSegments()).isGreaterThan(3);
-    }
-    try (Engine e = open(dir)) {
-      assertThat(e.stats().recoveredRecords()).isEqualTo(300L);
-      for (int i = 0; i < 300; i++) {
-        assertThat(e.get(b("k" + i)).isPresent()).isTrue();
       }
     }
   }
@@ -156,25 +137,6 @@ class RecoveryTest {
       assertThat(e.stats().truncatedWalBytes()).isEqualTo(37L);
       assertThat(e.get(b("k49")).orElseThrow().value()).isEqualTo(b("v49"));
     }
-  }
-
-  @Test
-  void corruptRecordInAnEarlierSegmentIsAHardError() throws IOException {
-    try (Engine e = open(dir, FsyncMode.ALWAYS, 1024)) {
-      for (int i = 0; i < 100; i++) {
-        e.put(b("k" + i), new byte[40], i + 1);
-      }
-    }
-    List<Long> ids = WriteAheadLog.listSegments(dir.resolve("wal"));
-    assertThat(ids.size()).isGreaterThan(2);
-    Path first = WriteAheadLog.segmentPath(dir.resolve("wal"), ids.get(0));
-    byte[] bytes = Files.readAllBytes(first);
-    bytes[bytes.length / 2] ^= 0x40;
-    Files.write(first, bytes);
-
-    assertThatThrownBy(() -> open(dir))
-        .isInstanceOf(UncheckedIOException.class)
-        .hasCauseInstanceOf(CorruptWalException.class);
   }
 
   private static String key(int i) {

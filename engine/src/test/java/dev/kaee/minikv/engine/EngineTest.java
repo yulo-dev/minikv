@@ -67,13 +67,15 @@ class EngineTest {
   }
 
   @Test
-  void readsCompareVersionsAcrossImmutableMemtables() {
+  void readsCompareVersionsAcrossOlderComponents() {
     try (Engine e = open(512)) {
       e.put(b("k"), b("newer"), 100);
       for (int i = 0; i < 50; i++) {
         e.put(b("filler" + i), new byte[32], 1);
       }
-      assertThat(e.stats().immutableMemtables()).isGreaterThan(0);
+      // The older memtable may already be flushed by now; either way it is no longer active.
+      EngineStats st = e.stats();
+      assertThat(st.immutableMemtables() + st.sstables()).isGreaterThan(0);
       // An older timestamp that arrives later lands in a newer memtable and must not win.
       e.put(b("k"), b("older"), 50);
       assertThat(e.get(b("k")).orElseThrow().value()).isEqualTo(b("newer"));
