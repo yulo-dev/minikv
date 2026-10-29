@@ -17,8 +17,8 @@ import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Engine built from a WAL and memtables. SSTables, flush and compaction arrive in later
- * milestones; until then immutable memtables stay in memory and their WAL segments stay on disk.
+ * Engine built from a WAL and memtables. SSTables, flush and compaction arrive in later milestones;
+ * until then immutable memtables stay in memory and their WAL segments stay on disk.
  *
  * <p>A write holds the rotation read lock across WAL append, fsync wait and memtable insert. This
  * keeps the invariant later milestones depend on: a record in WAL segment {@code k} is in the

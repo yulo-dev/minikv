@@ -22,8 +22,8 @@ import java.util.regex.Pattern;
  * durable up to its end position. An fsync always covers everything appended before it started,
  * which is what lets concurrent writers share one fsync.
  *
- * <p>Lock order is {@code syncMonitor} then {@code writeLock}. Appends take only {@code
- * writeLock}, so they never wait behind an fsync in progress.
+ * <p>Lock order is {@code syncMonitor} then {@code writeLock}. Appends take only {@code writeLock},
+ * so they never wait behind an fsync in progress.
  */
 public final class WriteAheadLog implements AutoCloseable {
 
