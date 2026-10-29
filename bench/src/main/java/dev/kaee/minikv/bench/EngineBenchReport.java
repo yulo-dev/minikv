@@ -112,13 +112,15 @@ public final class EngineBenchReport {
           String v = r.getParams().getParam(k);
           md.append(' ').append(v == null ? "" : v).append(" |");
         }
+        double error = r.getPrimaryResult().getScoreError();
         md.append(
             String.format(
                 Locale.ROOT,
-                " %d | %,.0f | %,.0f | %s |\n",
+                " %d | %,.0f | %s | %s |\n",
                 r.getParams().getThreads(),
                 r.getPrimaryResult().getScore(),
-                r.getPrimaryResult().getScoreError(),
+                // JMH reports NaN when there are too few iterations for an interval.
+                Double.isNaN(error) ? "n/a" : String.format(Locale.ROOT, "%,.0f", error),
                 r.getPrimaryResult().getScoreUnit()));
       }
       md.append('\n');
