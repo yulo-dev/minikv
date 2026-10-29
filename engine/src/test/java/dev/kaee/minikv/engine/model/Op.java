@@ -14,5 +14,7 @@ public sealed interface Op {
 
   record Flush() implements Op {}
 
+  record Compact() implements Op {}
+
   record Restart() implements Op {}
 }

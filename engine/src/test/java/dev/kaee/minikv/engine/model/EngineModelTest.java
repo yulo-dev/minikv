@@ -10,7 +10,7 @@ import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
 import net.jqwik.api.Tuple;
 
-/** Random put/delete/get/scan/flush/restart sequences must behave like a sorted map. */
+/** Random put/delete/get/scan/flush/compact/restart sequences must behave like a sorted map. */
 class EngineModelTest {
 
   @Property(tries = 1000)
@@ -29,6 +29,7 @@ class EngineModelTest {
     Arbitrary<Op> get = key.map(Op.Get::new);
     Arbitrary<Op> scan = Combinators.combine(key, key).as(Op.Scan::new);
     Arbitrary<Op> flush = Arbitraries.just(new Op.Flush());
+    Arbitrary<Op> compact = Arbitraries.just(new Op.Compact());
     Arbitrary<Op> restart = Arbitraries.just(new Op.Restart());
 
     return Arbitraries.frequencyOf(
@@ -37,6 +38,7 @@ class EngineModelTest {
             Tuple.of(6, get),
             Tuple.of(2, scan),
             Tuple.of(1, flush),
+            Tuple.of(1, compact),
             Tuple.of(1, restart))
         .list()
         .ofMinSize(1)

@@ -4,6 +4,7 @@ import dev.kaee.minikv.engine.Engine;
 import dev.kaee.minikv.engine.EngineConfig;
 import dev.kaee.minikv.engine.Engines;
 import dev.kaee.minikv.engine.Entry;
+import dev.kaee.minikv.engine.Timestamps;
 import dev.kaee.minikv.engine.VersionedValue;
 import dev.kaee.minikv.engine.wal.FsyncMode;
 import java.io.IOException;
@@ -27,9 +28,12 @@ import java.util.stream.Stream;
  * difference.
  *
  * <p>The engine uses a tiny memtable and block size so short sequences still rotate memtables,
- * flush in the background, build multi-block tables and recover from restarts. Timestamps are
- * {@code ts * 10_000 + step}: unique like real hybrid-logical-clock timestamps, but often out of
- * order, so last-write-wins resolution is exercised across every component.
+ * flush and compact in the background, build multi-block tables and recover from restarts.
+ * Timestamps follow the hybrid-logical-clock layout with physical time {@code now + ts} ms and the
+ * step number in the low bits: unique, recent, and often out of order, so last-write-wins
+ * resolution is exercised across every component. Being recent, tombstones stay within the grace
+ * period, so the model's tombstones match the engine's exactly; tombstone removal has its own tests
+ * in {@code CompactionTest}.
  */
 public final class ModelCheck {
 
@@ -59,6 +63,7 @@ public final class ModelCheck {
             .sstableBlockBytes(128)
             .build();
     TreeMap<String, VersionedValue> model = new TreeMap<>();
+    long base = System.currentTimeMillis();
     Engine engine = Engines.open(config);
     try {
       for (int step = 0; step < ops.size(); step++) {
@@ -68,18 +73,19 @@ public final class ModelCheck {
           case Op.Put p -> {
             byte[] value = new byte[p.valueLen()];
             Arrays.fill(value, (byte) step);
-            long ts = p.ts() * 10_000L + step;
+            long ts = Timestamps.of(base + p.ts(), 0, 0) + step;
             engine.put(bytes(key(p.key())), value, ts);
             model.merge(key(p.key()), VersionedValue.of(value, ts), VersionedValue::newer);
           }
           case Op.Delete d -> {
-            long ts = d.ts() * 10_000L + step;
+            long ts = Timestamps.of(base + d.ts(), 0, 0) + step;
             engine.delete(bytes(key(d.key())), ts);
             model.merge(key(d.key()), VersionedValue.tombstoneAt(ts), VersionedValue::newer);
           }
           case Op.Get g -> checkGet(engine, model, g.key(), where);
           case Op.Scan s -> checkScan(engine, model, s.from(), s.to(), where);
           case Op.Flush f -> engine.flush();
+          case Op.Compact c -> engine.compact();
           case Op.Restart r -> {
             engine.close();
             engine = Engines.open(config);
