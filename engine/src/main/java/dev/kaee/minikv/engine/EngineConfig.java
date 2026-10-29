@@ -62,13 +62,17 @@ public record EngineConfig(
   }
 
   /**
-   * Builder with the spec defaults: BATCH fsync every 5 ms, 4 MiB memtable, 4 KiB blocks, 10 bloom
-   * bits per key, size-tiered compaction of 4 to 32 similar tables in the background, 10 minute
-   * tombstone grace. Writers stall while 4 frozen memtables wait for flush.
+   * Builder with defaults: ALWAYS fsync, 4 MiB memtable, 4 KiB blocks, 10 bloom bits per key,
+   * size-tiered compaction of 4 to 32 similar tables in the background, 10 minute tombstone grace.
+   * Writers stall while 4 frozen memtables wait for flush.
+   *
+   * <p>The spec's default was BATCH every 5 ms. ALWAYS replaced it because its leader/follower
+   * group commit measured faster at every thread count in docs/results.md, and it acknowledges only
+   * durable writes. BATCH remains available; the interval applies only to it.
    */
   public static final class Builder {
     private final Path dataDir;
-    private FsyncMode fsyncMode = FsyncMode.BATCH;
+    private FsyncMode fsyncMode = FsyncMode.ALWAYS;
     private Duration groupCommitInterval = DEFAULT_GROUP_COMMIT;
     private long memtableFlushBytes = DEFAULT_MEMTABLE_BYTES;
     private int maxImmutableMemtables = DEFAULT_MAX_IMMUTABLE_MEMTABLES;

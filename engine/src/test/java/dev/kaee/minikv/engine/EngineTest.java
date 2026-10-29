@@ -87,6 +87,11 @@ class EngineTest {
   }
 
   @Test
+  void defaultsToAlwaysFsync() {
+    assertThat(EngineConfig.builder(dir).build().fsyncMode()).isEqualTo(FsyncMode.ALWAYS);
+  }
+
+  @Test
   void closedEngineRejectsCalls() {
     Engine e = open(EngineConfig.DEFAULT_MEMTABLE_BYTES);
     e.close();
