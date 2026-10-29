@@ -7,16 +7,23 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Reads an immutable SSTable. Opening loads the footer, index, bloom filter and key range into
  * memory; a point lookup then costs at most one block read. Safe for concurrent use.
+ *
+ * <p>Reference counted. The engine holds one reference while the table is live; each read holds
+ * another for its duration. When compaction replaces the table, the engine deletes the file and
+ * drops its reference; the channel closes when the last reader releases. On Linux and macOS an
+ * unlinked file stays readable through an open channel, so in-flight reads finish normally.
  */
 public final class SSTableReader implements AutoCloseable {
 
@@ -34,6 +41,7 @@ public final class SSTableReader implements AutoCloseable {
   private final long maxTimestamp;
   private final AtomicLong bloomNegatives = new AtomicLong();
   private final AtomicLong bloomFalsePositives = new AtomicLong();
+  private final AtomicInteger refs = new AtomicInteger(1);
 
   private SSTableReader(Path path, FileChannel channel) throws IOException {
     this.path = path;
@@ -281,8 +289,40 @@ public final class SSTableReader implements AutoCloseable {
     return bloomFalsePositives.get();
   }
 
+  /** Takes a reference for a read. Returns false if the table is already fully released. */
+  public boolean tryAcquire() {
+    while (true) {
+      int r = refs.get();
+      if (r <= 0) {
+        return false;
+      }
+      if (refs.compareAndSet(r, r + 1)) {
+        return true;
+      }
+    }
+  }
+
+  /** Drops a reference; the last one closes the channel. */
+  public void release() {
+    if (refs.decrementAndGet() == 0) {
+      try {
+        channel.close();
+      } catch (IOException e) {
+        System.getLogger(SSTableReader.class.getName())
+            .log(System.Logger.Level.WARNING, "closing " + path + " failed", e);
+      }
+    }
+  }
+
+  /** Deletes the file. Open readers keep working; call {@link #release()} afterwards. */
+  public void deleteFile() throws IOException {
+    Files.deleteIfExists(path);
+  }
+
+  /** Closes the channel regardless of outstanding references. Used when the engine shuts down. */
   @Override
   public void close() throws IOException {
+    refs.set(0);
     channel.close();
   }
 }
