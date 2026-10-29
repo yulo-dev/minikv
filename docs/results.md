@@ -13,9 +13,9 @@ Command: `./gradlew benchReport`
 - OS: Linux 7.0.0-1017-azure (amd64)
 - JVM: OpenJDK 64-Bit Server VM 21.0.13+9-LTS
 - Data directory: /tmp on ext4
-- Commit: 86e6718
-- JMH: 1 fork, 2 warmup and 3 measurement iterations of 3 s each, `-Xmx2g`
-- Generated: 2026-10-29T07:55:13.792155053Z
+- Commit: 534c675
+- JMH: 3 forks, 2 warmup and 5 measurement iterations of 3 s each, `-Xmx2g`
+- Generated: 2026-10-29T17:01:33.851528265Z
 
 Scores are JMH throughput means; ± is JMH's 99.9% confidence interval half-width. Data lives in `java.io.tmpdir`; see the machine details for its filesystem.
 
@@ -23,59 +23,59 @@ Scores are JMH throughput means; ± is JMH's 99.9% confidence interval half-widt
 
 | bloomBitsPerKey | valueSize | threads | score | ± | unit |
 | --- | --- | ---: | ---: | ---: | --- |
-| 1 | 100 | 1 | 373,953 | 79,646 | ops/s |
-| 1 | 1024 | 1 | 362,495 | 39,428 | ops/s |
-| 10 | 100 | 1 | 383,970 | 8,477 | ops/s |
-| 10 | 1024 | 1 | 375,376 | 86,504 | ops/s |
+| 1 | 100 | 1 | 367,604 | 6,727 | ops/s |
+| 1 | 1024 | 1 | 365,957 | 8,755 | ops/s |
+| 10 | 100 | 1 | 360,461 | 7,368 | ops/s |
+| 10 | 1024 | 1 | 357,553 | 9,937 | ops/s |
 
 ### `GetBenchmark.getMiss`
 
 | bloomBitsPerKey | valueSize | threads | score | ± | unit |
 | --- | --- | ---: | ---: | ---: | --- |
-| 1 | 100 | 1 | 595,937 | 82,862 | ops/s |
-| 1 | 1024 | 1 | 587,889 | 52,766 | ops/s |
-| 10 | 100 | 1 | 9,923,012 | 1,092,321 | ops/s |
-| 10 | 1024 | 1 | 9,970,199 | 1,343,333 | ops/s |
+| 1 | 100 | 1 | 567,169 | 7,048 | ops/s |
+| 1 | 1024 | 1 | 559,911 | 18,082 | ops/s |
+| 10 | 100 | 1 | 9,910,479 | 66,822 | ops/s |
+| 10 | 1024 | 1 | 9,921,988 | 146,230 | ops/s |
 
 ### `PutBenchmark.put`
 
 | fsync | order | valueSize | threads | score | ± | unit |
 | --- | --- | --- | ---: | ---: | ---: | --- |
-| NONE | sequential | 100 | 1 | 509,728 | 309,002 | ops/s |
-| NONE | sequential | 1024 | 1 | 182,158 | 138,397 | ops/s |
-| NONE | random | 100 | 1 | 399,398 | 117,800 | ops/s |
-| NONE | random | 1024 | 1 | 179,347 | 131,588 | ops/s |
-| BATCH | sequential | 100 | 1 | 199 | 3 | ops/s |
-| BATCH | sequential | 1024 | 1 | 196 | 101 | ops/s |
-| BATCH | random | 100 | 1 | 200 | 11 | ops/s |
-| BATCH | random | 1024 | 1 | 199 | 20 | ops/s |
-| ALWAYS | sequential | 100 | 1 | 4,657 | 1,188 | ops/s |
-| ALWAYS | sequential | 1024 | 1 | 4,498 | 660 | ops/s |
-| ALWAYS | random | 100 | 1 | 4,741 | 6,280 | ops/s |
-| ALWAYS | random | 1024 | 1 | 4,490 | 1,530 | ops/s |
+| NONE | sequential | 100 | 1 | 502,424 | 14,266 | ops/s |
+| NONE | sequential | 1024 | 1 | 181,285 | 13,293 | ops/s |
+| NONE | random | 100 | 1 | 388,760 | 7,501 | ops/s |
+| NONE | random | 1024 | 1 | 177,275 | 11,718 | ops/s |
+| BATCH | sequential | 100 | 1 | 200 | 0 | ops/s |
+| BATCH | sequential | 1024 | 1 | 200 | 0 | ops/s |
+| BATCH | random | 100 | 1 | 200 | 0 | ops/s |
+| BATCH | random | 1024 | 1 | 200 | 0 | ops/s |
+| ALWAYS | sequential | 100 | 1 | 5,146 | 38 | ops/s |
+| ALWAYS | sequential | 1024 | 1 | 4,696 | 45 | ops/s |
+| ALWAYS | random | 100 | 1 | 5,104 | 48 | ops/s |
+| ALWAYS | random | 1024 | 1 | 4,719 | 60 | ops/s |
 
 ### `PutBenchmark.put16Threads`
 
 | fsync | order | valueSize | threads | score | ± | unit |
 | --- | --- | --- | ---: | ---: | ---: | --- |
-| NONE | sequential | 100 | 16 | 254,604 | 81,085 | ops/s |
-| NONE | sequential | 1024 | 16 | 204,225 | 374,845 | ops/s |
-| NONE | random | 100 | 16 | 199,015 | 42,069 | ops/s |
-| NONE | random | 1024 | 16 | 163,572 | 20,205 | ops/s |
-| BATCH | sequential | 100 | 16 | 3,188 | 135 | ops/s |
-| BATCH | sequential | 1024 | 16 | 3,195 | 97 | ops/s |
-| BATCH | random | 100 | 16 | 3,168 | 82 | ops/s |
-| BATCH | random | 1024 | 16 | 3,190 | 20 | ops/s |
-| ALWAYS | sequential | 100 | 16 | 18,343 | 62,350 | ops/s |
-| ALWAYS | sequential | 1024 | 16 | 20,680 | 83,525 | ops/s |
-| ALWAYS | random | 100 | 16 | 23,088 | 33,110 | ops/s |
-| ALWAYS | random | 1024 | 16 | 22,418 | 39,008 | ops/s |
+| NONE | sequential | 100 | 16 | 251,554 | 11,224 | ops/s |
+| NONE | sequential | 1024 | 16 | 189,557 | 15,874 | ops/s |
+| NONE | random | 100 | 16 | 197,713 | 3,915 | ops/s |
+| NONE | random | 1024 | 16 | 155,853 | 8,121 | ops/s |
+| BATCH | sequential | 100 | 16 | 3,193 | 10 | ops/s |
+| BATCH | sequential | 1024 | 16 | 3,198 | 3 | ops/s |
+| BATCH | random | 100 | 16 | 3,196 | 10 | ops/s |
+| BATCH | random | 1024 | 16 | 3,199 | 2 | ops/s |
+| ALWAYS | sequential | 100 | 16 | 26,382 | 677 | ops/s |
+| ALWAYS | sequential | 1024 | 16 | 25,035 | 3,125 | ops/s |
+| ALWAYS | random | 100 | 16 | 25,565 | 405 | ops/s |
+| ALWAYS | random | 1024 | 16 | 24,402 | 2,553 | ops/s |
 
 ### `ScanBenchmark.scan1000`
 
 | valueSize | threads | score | ± | unit |
 | --- | ---: | ---: | ---: | --- |
-| 100 | 1 | 8,193 | 4,374 | ops/s |
-| 1024 | 1 | 1,666 | 214 | ops/s |
+| 100 | 1 | 8,541 | 191 | ops/s |
+| 1024 | 1 | 1,721 | 65 | ops/s |
 
 <!-- engine:end -->
