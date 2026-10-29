@@ -13,10 +13,6 @@ subprojects {
 
     repositories { mavenCentral() }
 
-    extensions.configure<JavaPluginExtension> {
-        toolchain { languageVersion.set(JavaLanguageVersion.of(21)) }
-    }
-
     dependencies {
         "errorprone"("com.google.errorprone:error_prone_core:2.36.0")
         "testImplementation"(platform("org.junit:junit-bom:5.11.4"))
