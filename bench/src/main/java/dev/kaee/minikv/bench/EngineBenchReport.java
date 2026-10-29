@@ -40,9 +40,10 @@ public final class EngineBenchReport {
     String command = args.length > 1 ? args[1] : "./gradlew benchReport";
     boolean quick = Boolean.getBoolean("minikv.bench.quick");
 
-    int forks = 1;
+    // Three forks, so JIT and disk variance between JVMs shows up in the error bars.
+    int forks = quick ? 1 : 3;
     int warmupIterations = quick ? 1 : 2;
-    int measurementIterations = quick ? 1 : 3;
+    int measurementIterations = quick ? 1 : 5;
     TimeValue iterationTime = quick ? TimeValue.seconds(1) : TimeValue.seconds(3);
     Options options =
         new OptionsBuilder()
@@ -70,7 +71,7 @@ public final class EngineBenchReport {
     md.append(
         String.format(
             Locale.ROOT,
-            "- JMH: %d fork, %d warmup and %d measurement iterations of %s each, `-Xmx2g`\n",
+            "- JMH: %d forks, %d warmup and %d measurement iterations of %s each, `-Xmx2g`\n",
             forks,
             warmupIterations,
             measurementIterations,
