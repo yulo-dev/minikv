@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Random;
 import java.util.TreeSet;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -66,6 +67,7 @@ class RecoveryTest {
    * never acknowledged. Recovery must keep exactly the records that end at or before the cut,
    * truncate the rest, and leave the engine writable and recoverable again.
    */
+  @Tag("crash")
   @Test
   void tornTailAtRandomOffsetsLosesOnlyRecordsPastTheCut() throws IOException {
     Random rnd = new Random(SEED);
@@ -120,6 +122,7 @@ class RecoveryTest {
     }
   }
 
+  @Tag("crash")
   @Test
   void garbageAfterTheLastRecordIsTruncated() throws IOException {
     try (Engine e = open(dir)) {
