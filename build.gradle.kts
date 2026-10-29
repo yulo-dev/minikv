@@ -42,3 +42,9 @@ subprojects {
         }
     }
 }
+
+tasks.register("benchReport") {
+    group = "benchmark"
+    description = "Runs engine benchmarks and regenerates docs/results.md."
+    dependsOn(":bench:benchReport")
+}

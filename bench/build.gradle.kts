@@ -14,3 +14,21 @@ tasks.withType<JavaCompile>().configureEach {
         excludedPaths.set(".*/build/generated/.*")
     }
 }
+
+val quick = project.hasProperty("quick")
+
+val benchReport by tasks.registering(JavaExec::class) {
+    group = "benchmark"
+    description = "Runs the JMH engine benchmarks and rewrites the engine section of docs/results.md."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("dev.kaee.minikv.bench.EngineBenchReport")
+    workingDir = rootProject.projectDir
+    // -Pquick is a smoke run of the whole pipeline. Its numbers are not meaningful, so it writes
+    // to build/ instead of docs/.
+    val output = if (quick) "build/results-quick.md" else "docs/results.md"
+    val command = if (quick) "./gradlew benchReport -Pquick" else "./gradlew benchReport"
+    args(rootProject.file(output).absolutePath, command)
+    if (quick) {
+        systemProperty("minikv.bench.quick", "true")
+    }
+}
