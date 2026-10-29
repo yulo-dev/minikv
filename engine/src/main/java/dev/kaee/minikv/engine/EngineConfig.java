@@ -1,8 +1,11 @@
 package dev.kaee.minikv.engine;
 
+import dev.kaee.minikv.engine.compaction.CompactionStrategy;
+import dev.kaee.minikv.engine.compaction.SizeTieredStrategy;
 import dev.kaee.minikv.engine.sstable.SSTableWriter;
 import dev.kaee.minikv.engine.wal.FsyncMode;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.Objects;
 
@@ -14,7 +17,10 @@ public record EngineConfig(
     long memtableFlushBytes,
     int maxImmutableMemtables,
     int sstableBlockBytes,
-    int bloomBitsPerKey) {
+    int bloomBitsPerKey,
+    CompactionStrategy compactionStrategy,
+    boolean autoCompaction,
+    TombstonePolicy tombstonePolicy) {
 
   public static final Duration DEFAULT_GROUP_COMMIT = Duration.ofMillis(5);
   public static final long DEFAULT_MEMTABLE_BYTES = 4L * 1024 * 1024;
@@ -39,6 +45,8 @@ public record EngineConfig(
     if (bloomBitsPerKey < 1) {
       throw new IllegalArgumentException("bloomBitsPerKey must be positive");
     }
+    Objects.requireNonNull(compactionStrategy, "compactionStrategy");
+    Objects.requireNonNull(tombstonePolicy, "tombstonePolicy");
   }
 
   public Path walDir() {
@@ -55,7 +63,8 @@ public record EngineConfig(
 
   /**
    * Builder with the spec defaults: BATCH fsync every 5 ms, 4 MiB memtable, 4 KiB blocks, 10 bloom
-   * bits per key. Writers stall while 4 frozen memtables wait for flush.
+   * bits per key, size-tiered compaction of 4 to 32 similar tables in the background, 10 minute
+   * tombstone grace. Writers stall while 4 frozen memtables wait for flush.
    */
   public static final class Builder {
     private final Path dataDir;
@@ -65,6 +74,10 @@ public record EngineConfig(
     private int maxImmutableMemtables = DEFAULT_MAX_IMMUTABLE_MEMTABLES;
     private int sstableBlockBytes = SSTableWriter.DEFAULT_BLOCK_BYTES;
     private int bloomBitsPerKey = SSTableWriter.DEFAULT_BITS_PER_KEY;
+    private CompactionStrategy compactionStrategy;
+    private boolean autoCompaction = true;
+    private TombstonePolicy tombstonePolicy =
+        TombstonePolicy.gcGrace(TombstonePolicy.DEFAULT_GC_GRACE, Clock.systemUTC());
 
     private Builder(Path dataDir) {
       this.dataDir = dataDir;
@@ -100,7 +113,33 @@ public record EngineConfig(
       return this;
     }
 
+    /** Defaults to size-tiered with tables under one memtable's size sharing a bucket. */
+    public Builder compactionStrategy(CompactionStrategy strategy) {
+      this.compactionStrategy = strategy;
+      return this;
+    }
+
+    /** When false, compaction runs only through {@link Engine#compact()}. */
+    public Builder autoCompaction(boolean enabled) {
+      this.autoCompaction = enabled;
+      return this;
+    }
+
+    public Builder tombstonePolicy(TombstonePolicy policy) {
+      this.tombstonePolicy = policy;
+      return this;
+    }
+
+    public Builder tombstoneGcGrace(Duration grace) {
+      this.tombstonePolicy = TombstonePolicy.gcGrace(grace, Clock.systemUTC());
+      return this;
+    }
+
     public EngineConfig build() {
+      CompactionStrategy strategy =
+          compactionStrategy != null
+              ? compactionStrategy
+              : new SizeTieredStrategy(4, 32, memtableFlushBytes);
       return new EngineConfig(
           dataDir,
           fsyncMode,
@@ -108,7 +147,10 @@ public record EngineConfig(
           memtableFlushBytes,
           maxImmutableMemtables,
           sstableBlockBytes,
-          bloomBitsPerKey);
+          bloomBitsPerKey,
+          strategy,
+          autoCompaction,
+          tombstonePolicy);
     }
   }
 }

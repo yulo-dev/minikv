@@ -22,7 +22,14 @@ public interface Engine extends AutoCloseable {
   /** Live entries in {@code [fromInclusive, toExclusive)}; a null bound means unbounded. */
   Iterator<Entry> scan(byte[] fromInclusive, byte[] toExclusive);
 
+  /** Writes every memtable to SSTables and waits for it. */
   void flush();
+
+  /**
+   * Flushes, then merges all SSTables into one and waits for it. Background compaction is
+   * incremental; this is the manual full compaction, useful before benchmarks and in tests.
+   */
+  void compact();
 
   EngineStats stats();
 

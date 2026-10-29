@@ -10,5 +10,7 @@ public record EngineStats(
     long recoveredRecords,
     long truncatedWalBytes,
     long flushes,
+    long compactions,
+    long tombstonesDropped,
     long bloomNegatives,
     long bloomFalsePositives) {}

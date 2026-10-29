@@ -40,7 +40,8 @@ class FlushTest {
       EngineStats st = e.stats();
       assertThat(st.immutableMemtables()).isEqualTo(0);
       assertThat(st.activeMemtableBytes()).isEqualTo(0L);
-      assertThat(st.sstables()).isGreaterThan(10);
+      assertThat(st.flushes()).isGreaterThan(10L);
+      assertThat(st.sstables()).isGreaterThan(0);
       assertThat(st.walSegments()).isEqualTo(1);
     }
     try (Engine e = open(4096, 4)) {

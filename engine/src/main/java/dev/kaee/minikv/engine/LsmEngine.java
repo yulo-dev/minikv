@@ -1,5 +1,6 @@
 package dev.kaee.minikv.engine;
 
+import dev.kaee.minikv.engine.compaction.MergeIterator;
 import dev.kaee.minikv.engine.manifest.Edit;
 import dev.kaee.minikv.engine.manifest.Manifest;
 import dev.kaee.minikv.engine.memtable.MemTable;
@@ -22,11 +23,13 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.Set;
-import java.util.TreeMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -41,15 +44,20 @@ import java.util.regex.Pattern;
  * <p>Write path: append to the WAL, wait for durability, insert into the active memtable. At the
  * size threshold the memtable freezes, a new WAL segment starts, and a background thread writes the
  * frozen memtable to an SSTable, records it in the manifest, then deletes the WAL segments it
- * covered.
+ * covered. A second background thread merges SSTables as the compaction strategy asks.
  *
  * <p>A write holds the rotation read lock across WAL append, fsync wait and memtable insert, so a
  * record in WAL segment {@code k} is always in the memtable that covers segment {@code k}. That is
  * what makes deleting a segment after its memtable is flushed safe.
  *
- * <p>Read path: active memtable, frozen memtables, then SSTables, newest first. Writes may arrive
- * out of timestamp order, so a newer component can hold an older version; every component is
- * consulted, and an SSTable whose max timestamp cannot beat the best version so far is skipped.
+ * <p>Read path: an immutable {@link State} snapshot of active memtable, frozen memtables and
+ * SSTables, each table reference counted for the duration of the read. Writes may arrive out of
+ * timestamp order, so a newer component can hold an older version; every component is consulted,
+ * and an SSTable whose max timestamp cannot beat the best version so far is skipped.
+ *
+ * <p>Neither flush nor compaction blocks writers except for the brief state swap under the rotation
+ * write lock. Reads never block: a read that started before a compaction swap keeps reading the old
+ * tables until it finishes.
  */
 final class LsmEngine implements Engine {
 
@@ -59,18 +67,24 @@ final class LsmEngine implements Engine {
   /** A frozen memtable and the last WAL segment whose records it holds. */
   private record Frozen(MemTable memtable, long walSegmentThrough) {}
 
-  /** Immutable snapshot of the read path. Lists are newest first. */
-  private record State(MemTable active, List<Frozen> immutables, List<SSTableReader> tables) {}
+  /** A live SSTable and its manifest id. */
+  private record Table(long id, SSTableReader reader) {}
+
+  /** Immutable snapshot of the read path. Memtable list is newest first. */
+  private record State(MemTable active, List<Frozen> immutables, List<Table> tables) {}
 
   private final EngineConfig config;
   private final WriteAheadLog wal;
   private final Manifest manifest;
   private final ReentrantReadWriteLock rotationLock = new ReentrantReadWriteLock();
   private final Object flushMonitor = new Object();
-  private final ExecutorService flusher;
+  private final ExecutorService flusher = daemonExecutor("memtable-flush");
+  private final ExecutorService compactor = daemonExecutor("compaction");
   private final long recoveredRecords;
   private final long truncatedWalBytes;
   private final AtomicLong flushes = new AtomicLong();
+  private final AtomicLong compactions = new AtomicLong();
+  private final AtomicLong tombstonesDropped = new AtomicLong();
 
   private volatile State state;
   private volatile boolean closed;
@@ -88,24 +102,27 @@ final class LsmEngine implements Engine {
     this.state = initial;
     this.recoveredRecords = replay.records();
     this.truncatedWalBytes = replay.truncatedBytes();
-    this.flusher =
-        Executors.newSingleThreadExecutor(
-            r -> {
-              Thread t = new Thread(r, "memtable-flush");
-              t.setDaemon(true);
-              return t;
-            });
+  }
+
+  private static ExecutorService daemonExecutor(String name) {
+    return Executors.newSingleThreadExecutor(
+        r -> {
+          Thread t = new Thread(r, name);
+          t.setDaemon(true);
+          return t;
+        });
   }
 
   static LsmEngine open(EngineConfig config) throws IOException {
     Files.createDirectories(config.sstableDir());
     Manifest manifest = Manifest.open(config.dataDir());
-    List<SSTableReader> tables = new ArrayList<>();
+    List<Table> tables = new ArrayList<>();
     try {
       Manifest.State ms = manifest.state();
       removeOrphans(config, ms);
       for (int i = ms.liveTables().size() - 1; i >= 0; i--) {
-        tables.add(SSTableReader.open(sstablePath(config, ms.liveTables().get(i))));
+        long id = ms.liveTables().get(i);
+        tables.add(new Table(id, SSTableReader.open(sstablePath(config, id))));
       }
       MemTable recovered = new MemTable();
       WalReplay.Result replay =
@@ -113,10 +130,12 @@ final class LsmEngine implements Engine {
       SyncPolicy policy = SyncPolicy.create(config.fsyncMode(), config.groupCommitInterval());
       WriteAheadLog wal = WriteAheadLog.open(config.walDir(), policy, ms.walRetiredThrough());
       State initial = new State(recovered, List.of(), List.copyOf(tables));
-      return new LsmEngine(config, wal, manifest, initial, replay);
+      LsmEngine engine = new LsmEngine(config, wal, manifest, initial, replay);
+      engine.scheduleCompaction();
+      return engine;
     } catch (IOException | RuntimeException e) {
-      for (SSTableReader t : tables) {
-        t.close();
+      for (Table t : tables) {
+        t.reader().close();
       }
       manifest.close();
       throw e;
@@ -124,7 +143,8 @@ final class LsmEngine implements Engine {
   }
 
   /**
-   * Deletes what a crash can leave behind: temp files, SSTables the manifest never recorded, and
+   * Deletes what a crash can leave behind: temp files, SSTables the manifest does not list (an
+   * unrecorded flush or compaction output, or compaction inputs whose deletion was cut short), and
    * WAL segments the manifest already retired.
    */
   private static void removeOrphans(EngineConfig config, Manifest.State ms) throws IOException {
@@ -246,7 +266,7 @@ final class LsmEngine implements Engine {
     }
   }
 
-  // ---- flush (background thread) ----
+  // ---- flush (flusher thread) ----
 
   private void flushPending() {
     try {
@@ -269,11 +289,7 @@ final class LsmEngine implements Engine {
   private void flushOne(Frozen frozen) throws IOException {
     long id = manifest.nextFileId();
     Path path = sstablePath(config, id);
-    try (SSTableWriter w =
-        SSTableWriter.builder(path)
-            .blockBytes(config.sstableBlockBytes())
-            .bitsPerKey(config.bloomBitsPerKey())
-            .open()) {
+    try (SSTableWriter w = newWriter(path)) {
       for (Map.Entry<byte[], VersionedValue> e : frozen.memtable().entries()) {
         w.add(e.getKey(), e.getValue());
       }
@@ -288,8 +304,8 @@ final class LsmEngine implements Engine {
       State s = state;
       List<Frozen> immutables = new ArrayList<>(s.immutables());
       immutables.removeIf(frozen::equals);
-      List<SSTableReader> tables = new ArrayList<>(s.tables().size() + 1);
-      tables.add(reader);
+      List<Table> tables = new ArrayList<>(s.tables().size() + 1);
+      tables.add(new Table(id, reader));
       tables.addAll(s.tables());
       state = new State(s.active(), List.copyOf(immutables), List.copyOf(tables));
     } finally {
@@ -300,6 +316,14 @@ final class LsmEngine implements Engine {
     synchronized (flushMonitor) {
       flushMonitor.notifyAll();
     }
+    scheduleCompaction();
+  }
+
+  private SSTableWriter newWriter(Path path) throws IOException {
+    return SSTableWriter.builder(path)
+        .blockBytes(config.sstableBlockBytes())
+        .bitsPerKey(config.bloomBitsPerKey())
+        .open();
   }
 
   /** Freezes the active memtable if it has data and waits until every memtable is in SSTables. */
@@ -345,28 +369,192 @@ final class LsmEngine implements Engine {
     }
   }
 
+  // ---- compaction (compactor thread) ----
+
+  private void scheduleCompaction() {
+    if (!config.autoCompaction()) {
+      return;
+    }
+    try {
+      compactor.execute(this::compactWhileNeeded);
+    } catch (RejectedExecutionException e) {
+      // Engine is closing.
+    }
+  }
+
+  private void compactWhileNeeded() {
+    try {
+      while (!closed) {
+        List<Table> picked =
+            config.compactionStrategy().select(state.tables(), t -> t.reader().fileBytes());
+        if (picked.isEmpty()) {
+          return;
+        }
+        compactTables(picked);
+      }
+    } catch (IOException | RuntimeException e) {
+      // Not fatal: the inputs stay live and correct. The next flush retries.
+      LOG.log(System.Logger.Level.ERROR, "compaction failed", e);
+    }
+  }
+
+  @Override
+  public void compact() {
+    flush();
+    Future<?> done =
+        compactor.submit(
+            () -> {
+              List<Table> all = state.tables();
+              if (!all.isEmpty()) {
+                compactTables(all);
+              }
+              return null;
+            });
+    try {
+      done.get();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new UncheckedIOException(new InterruptedIOException("interrupted during compaction"));
+    } catch (ExecutionException e) {
+      throw new IllegalStateException("compaction failed", e.getCause());
+    }
+  }
+
+  /**
+   * Merges {@code inputs} into at most one new table. Runs only on the compactor thread, which is
+   * the only code that removes tables, so the inputs stay live throughout.
+   */
+  private void compactTables(List<Table> inputs) throws IOException {
+    Set<Long> inputIds = new HashSet<>();
+    List<Iterator<Entry>> sources = new ArrayList<>();
+    for (Table t : inputs) {
+      inputIds.add(t.id());
+      sources.add(t.reader().iterator(null, null));
+    }
+    long id = manifest.nextFileId();
+    Path path = sstablePath(config, id);
+    boolean wroteAny = false;
+    long dropped = 0;
+    try (SSTableWriter w = newWriter(path)) {
+      MergeIterator merged = new MergeIterator(sources);
+      while (merged.hasNext()) {
+        Entry e = merged.next();
+        if (e.value().tombstone() && canDropTombstone(e, inputIds)) {
+          dropped++;
+          continue;
+        }
+        w.add(e.key(), e.value());
+        wroteAny = true;
+      }
+      if (wroteAny) {
+        w.finish();
+      }
+    }
+    SSTableReader output = wroteAny ? SSTableReader.open(path) : null;
+    List<Long> added = wroteAny ? List.of(id) : List.of();
+    manifest.apply(new Edit(added, List.copyOf(inputIds), 0));
+
+    rotationLock.writeLock().lock();
+    try {
+      State s = state;
+      List<Table> tables = new ArrayList<>(s.tables().size());
+      for (Table t : s.tables()) {
+        if (!inputIds.contains(t.id())) {
+          tables.add(t);
+        }
+      }
+      if (output != null) {
+        tables.add(new Table(id, output)); // holds the oldest data, so it goes last
+      }
+      state = new State(s.active(), s.immutables(), List.copyOf(tables));
+    } finally {
+      rotationLock.writeLock().unlock();
+    }
+    for (Table t : inputs) {
+      t.reader().deleteFile();
+      t.reader().release();
+    }
+    FileSync.fsyncDirectory(config.sstableDir());
+    compactions.incrementAndGet();
+    tombstonesDropped.addAndGet(dropped);
+  }
+
+  /**
+   * A tombstone may go only if it is past the grace period and no other component could hold an
+   * older version of the key. The spec's rule ("the compaction includes the oldest table") assumes
+   * older tables hold older timestamps; here writes arrive out of timestamp order, so any table or
+   * memtable outside the compaction is checked instead. That is strictly safer.
+   */
+  private boolean canDropTombstone(Entry e, Set<Long> inputIds) throws IOException {
+    if (!config.tombstonePolicy().expired(e.value().timestamp())) {
+      return false;
+    }
+    State s = state;
+    if (s.active().get(e.key()).isPresent()) {
+      return false;
+    }
+    for (Frozen f : s.immutables()) {
+      if (f.memtable().get(e.key()).isPresent()) {
+        return false;
+      }
+    }
+    for (Table t : s.tables()) {
+      if (!inputIds.contains(t.id()) && t.reader().get(e.key()).isPresent()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   // ---- reads ----
+
+  /** Snapshot whose tables are all referenced; release with {@link #release(State)}. */
+  private State acquire() {
+    while (true) {
+      ensureOpen();
+      State s = state;
+      List<Table> held = new ArrayList<>(s.tables().size());
+      boolean ok = true;
+      for (Table t : s.tables()) {
+        if (t.reader().tryAcquire()) {
+          held.add(t);
+        } else {
+          ok = false; // replaced by a compaction since we read state; take a fresh snapshot
+          break;
+        }
+      }
+      if (ok) {
+        return s;
+      }
+      held.forEach(t -> t.reader().release());
+    }
+  }
+
+  private static void release(State s) {
+    s.tables().forEach(t -> t.reader().release());
+  }
 
   @Override
   public Optional<VersionedValue> get(byte[] key) {
     Bytes.checkKey(key);
-    ensureOpen();
-    State s = state;
-    VersionedValue best = newer(null, s.active().get(key).orElse(null));
-    for (Frozen f : s.immutables()) {
-      best = newer(best, f.memtable().get(key).orElse(null));
-    }
+    State s = acquire();
     try {
-      for (SSTableReader t : s.tables()) {
-        if (best != null && t.maxTimestamp() <= best.timestamp()) {
+      VersionedValue best = newer(null, s.active().get(key).orElse(null));
+      for (Frozen f : s.immutables()) {
+        best = newer(best, f.memtable().get(key).orElse(null));
+      }
+      for (Table t : s.tables()) {
+        if (best != null && t.reader().maxTimestamp() <= best.timestamp()) {
           continue; // nothing in this table can win
         }
-        best = newer(best, t.get(key).orElse(null));
+        best = newer(best, t.reader().get(key).orElse(null));
       }
+      return Optional.ofNullable(best);
     } catch (IOException e) {
       throw new UncheckedIOException(e);
+    } finally {
+      release(s);
     }
-    return Optional.ofNullable(best);
   }
 
   private static VersionedValue newer(VersionedValue best, VersionedValue candidate) {
@@ -376,31 +564,68 @@ final class LsmEngine implements Engine {
     return best == null ? candidate : VersionedValue.newer(best, candidate);
   }
 
+  /**
+   * Streams live entries through a k-way merge of every memtable and table. The snapshot's tables
+   * stay referenced until the iterator is exhausted, so consume it fully; an abandoned iterator
+   * holds its files open until the engine closes.
+   */
   @Override
   public Iterator<Entry> scan(byte[] fromInclusive, byte[] toExclusive) {
-    ensureOpen();
-    State s = state;
-    // Materialised merge. The streaming k-way merge iterator replaces this with compaction.
-    TreeMap<byte[], VersionedValue> merged = new TreeMap<>(Bytes.UNSIGNED);
-    List<MemTable> memtables = new ArrayList<>();
-    memtables.add(s.active());
-    s.immutables().forEach(f -> memtables.add(f.memtable()));
-    for (MemTable m : memtables) {
-      for (Map.Entry<byte[], VersionedValue> e : m.range(fromInclusive, toExclusive).entrySet()) {
-        merged.merge(e.getKey(), e.getValue(), VersionedValue::newer);
+    State s = acquire();
+    List<Iterator<Entry>> sources = new ArrayList<>();
+    sources.add(memtableIterator(s.active(), fromInclusive, toExclusive));
+    for (Frozen f : s.immutables()) {
+      sources.add(memtableIterator(f.memtable(), fromInclusive, toExclusive));
+    }
+    for (Table t : s.tables()) {
+      sources.add(t.reader().iterator(fromInclusive, toExclusive));
+    }
+    MergeIterator merged = new MergeIterator(sources);
+    return new Iterator<>() {
+      private Entry next = advance();
+
+      private Entry advance() {
+        while (merged.hasNext()) {
+          Entry e = merged.next();
+          if (!e.value().tombstone()) {
+            return e;
+          }
+        }
+        release(s);
+        return null;
       }
-    }
-    for (SSTableReader t : s.tables()) {
-      t.iterator(fromInclusive, toExclusive)
-          .forEachRemaining(e -> merged.merge(e.key(), e.value(), VersionedValue::newer));
-    }
-    List<Entry> live = new ArrayList<>(merged.size());
-    for (Map.Entry<byte[], VersionedValue> e : merged.entrySet()) {
-      if (!e.getValue().tombstone()) {
-        live.add(new Entry(e.getKey(), e.getValue()));
+
+      @Override
+      public boolean hasNext() {
+        return next != null;
       }
-    }
-    return live.iterator();
+
+      @Override
+      public Entry next() {
+        if (next == null) {
+          throw new NoSuchElementException();
+        }
+        Entry current = next;
+        next = advance();
+        return current;
+      }
+    };
+  }
+
+  private static Iterator<Entry> memtableIterator(MemTable m, byte[] from, byte[] to) {
+    Iterator<Map.Entry<byte[], VersionedValue>> it = m.range(from, to).entrySet().iterator();
+    return new Iterator<>() {
+      @Override
+      public boolean hasNext() {
+        return it.hasNext();
+      }
+
+      @Override
+      public Entry next() {
+        Map.Entry<byte[], VersionedValue> e = it.next();
+        return new Entry(e.getKey(), e.getValue());
+      }
+    };
   }
 
   @Override
@@ -408,9 +633,9 @@ final class LsmEngine implements Engine {
     State s = state;
     long negatives = 0;
     long falsePositives = 0;
-    for (SSTableReader t : s.tables()) {
-      negatives += t.bloomNegatives();
-      falsePositives += t.bloomFalsePositives();
+    for (Table t : s.tables()) {
+      negatives += t.reader().bloomNegatives();
+      falsePositives += t.reader().bloomFalsePositives();
     }
     return new EngineStats(
         s.active().approximateBytes(),
@@ -421,6 +646,8 @@ final class LsmEngine implements Engine {
         recoveredRecords,
         truncatedWalBytes,
         flushes.get(),
+        compactions.get(),
+        tombstonesDropped.get(),
         negatives,
         falsePositives);
   }
@@ -433,9 +660,11 @@ final class LsmEngine implements Engine {
     }
     closed = true;
     flusher.shutdown();
+    compactor.shutdown();
     try {
-      if (!flusher.awaitTermination(1, TimeUnit.MINUTES)) {
-        LOG.log(System.Logger.Level.WARNING, "flush did not finish within 1 minute of close");
+      if (!flusher.awaitTermination(1, TimeUnit.MINUTES)
+          || !compactor.awaitTermination(1, TimeUnit.MINUTES)) {
+        LOG.log(System.Logger.Level.WARNING, "background work did not finish within 1 minute");
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
@@ -446,8 +675,8 @@ final class LsmEngine implements Engine {
     rotationLock.writeLock().lock();
     try {
       wal.close();
-      for (SSTableReader t : state.tables()) {
-        t.close();
+      for (Table t : state.tables()) {
+        t.reader().close();
       }
       manifest.close();
     } catch (IOException e) {
