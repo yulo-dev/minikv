@@ -29,7 +29,9 @@ class GroupCommitTest {
         "ALWAYS: %d records, %d fsyncs, %.1f records per fsync%n",
         THREADS * PER_THREAD, fsyncs, (double) THREADS * PER_THREAD / fsyncs);
     assertThat(fsyncs).isGreaterThan(0L);
-    assertThat(fsyncs).isLessThan((long) THREADS * PER_THREAD);
+    // Writers that arrive during an fsync must share the next one. Before leader/follower group
+    // commit this measured about 1.2 records per fsync, so require at least 2.
+    assertThat(fsyncs * 2 <= (long) THREADS * PER_THREAD).isTrue();
   }
 
   @Test

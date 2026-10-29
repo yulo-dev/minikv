@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -19,11 +20,18 @@ import java.util.regex.Pattern;
  *
  * <p>Positions are logical byte offsets across all segments written by this instance. A writer
  * appends under {@code writeLock}, then asks the {@link SyncPolicy} to wait until the log is
- * durable up to its end position. An fsync always covers everything appended before it started,
- * which is what lets concurrent writers share one fsync.
+ * durable up to its end position.
  *
- * <p>Lock order is {@code syncMonitor} then {@code writeLock}. Appends take only {@code writeLock},
- * so they never wait behind an fsync in progress.
+ * <p>Group commit is leader/follower. A writer that finds its position not yet durable and no fsync
+ * running becomes the leader: it snapshots the appended position, releases {@code syncLock},
+ * fsyncs, then wakes everyone. Writers that arrive meanwhile wait on a condition rather than
+ * queueing for the lock, so when the fsync ends they all see the new durable position at once, and
+ * one of those still uncovered leads the next fsync on behalf of all of them. A writer whose
+ * position is already durable returns without taking any lock.
+ *
+ * <p>Lock order is {@code syncLock} then {@code writeLock}. Appends take only {@code writeLock}. A
+ * failed fsync leaves the file's durable state unknown, so it poisons the log: every later
+ * durability wait fails.
  */
 public final class WriteAheadLog implements AutoCloseable {
 
@@ -33,7 +41,8 @@ public final class WriteAheadLog implements AutoCloseable {
   private final Path dir;
   private final SyncPolicy policy;
   private final ReentrantLock writeLock = new ReentrantLock();
-  private final Object syncMonitor = new Object();
+  private final ReentrantLock syncLock = new ReentrantLock();
+  private final Condition syncDone = syncLock.newCondition();
   private final AtomicLong fsyncs = new AtomicLong();
   private final List<Long> liveSegments = new ArrayList<>();
 
@@ -44,8 +53,11 @@ public final class WriteAheadLog implements AutoCloseable {
   private long appendedRecords;
   private boolean closed;
 
-  // Guarded by syncMonitor.
-  private long durablePosition;
+  // Written under syncLock; read without it on the fast path.
+  private volatile long durablePosition;
+
+  // Guarded by syncLock.
+  private boolean forceInProgress;
   private IOException syncFailure;
 
   private WriteAheadLog(Path dir, SyncPolicy policy, List<Long> existing, long firstId)
@@ -106,7 +118,9 @@ public final class WriteAheadLog implements AutoCloseable {
    * holds every record appended before this call.
    */
   public long rotate() throws IOException {
-    synchronized (syncMonitor) {
+    syncLock.lock();
+    try {
+      awaitNoForce();
       writeLock.lock();
       try {
         ensureOpen();
@@ -116,7 +130,7 @@ public final class WriteAheadLog implements AutoCloseable {
           fsyncs.incrementAndGet();
         }
         durablePosition = appendedPosition;
-        syncMonitor.notifyAll();
+        syncDone.signalAll();
         current.close();
         currentId++;
         current = createSegment(currentId);
@@ -125,6 +139,8 @@ public final class WriteAheadLog implements AutoCloseable {
       } finally {
         writeLock.unlock();
       }
+    } finally {
+      syncLock.unlock();
     }
   }
 
@@ -153,50 +169,60 @@ public final class WriteAheadLog implements AutoCloseable {
     }
   }
 
-  // ALWAYS mode: fsync unless another writer's fsync already covered this position.
+  // ALWAYS mode: lead an fsync or follow one until this position is durable.
   void syncTo(long position) throws IOException {
-    synchronized (syncMonitor) {
-      if (durablePosition >= position) {
-        return;
+    if (durablePosition >= position) {
+      return; // covered by an earlier fsync; no lock needed
+    }
+    syncLock.lock();
+    try {
+      while (durablePosition < position) {
+        throwIfUnusable();
+        if (forceInProgress) {
+          awaitSyncDone();
+        } else {
+          leadForce();
+        }
       }
-      forceLocked();
+    } finally {
+      syncLock.unlock();
     }
   }
 
   // BATCH mode: wait for the background thread.
   void awaitSynced(long position) throws IOException {
-    synchronized (syncMonitor) {
+    if (durablePosition >= position) {
+      return;
+    }
+    syncLock.lock();
+    try {
       while (durablePosition < position) {
-        if (syncFailure != null) {
-          throw new IOException("WAL fsync failed", syncFailure);
-        }
-        if (isClosed()) {
-          throw new IOException("WAL closed before write became durable");
-        }
-        try {
-          syncMonitor.wait();
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new IOException("interrupted waiting for WAL fsync", e);
-        }
+        throwIfUnusable();
+        awaitSyncDone();
       }
+    } finally {
+      syncLock.unlock();
     }
   }
 
   void backgroundSync() {
-    synchronized (syncMonitor) {
-      try {
-        forceLocked();
-      } catch (IOException e) {
-        LOG.log(System.Logger.Level.ERROR, "WAL background fsync failed", e);
-        syncFailure = e;
-        syncMonitor.notifyAll();
+    syncLock.lock();
+    try {
+      if (!forceInProgress && syncFailure == null) {
+        leadForce();
       }
+    } catch (IOException e) {
+      LOG.log(System.Logger.Level.ERROR, "WAL background fsync failed", e);
+    } finally {
+      syncLock.unlock();
     }
   }
 
-  // Caller holds syncMonitor. Rotation also needs syncMonitor, so the channel stays open here.
-  private void forceLocked() throws IOException {
+  /**
+   * Fsyncs everything appended so far. Caller holds {@code syncLock} and no force is running; the
+   * lock is released for the duration of the fsync and held again on return.
+   */
+  private void leadForce() throws IOException {
     FileChannel ch;
     long target;
     writeLock.lock();
@@ -209,11 +235,57 @@ public final class WriteAheadLog implements AutoCloseable {
     } finally {
       writeLock.unlock();
     }
-    if (target > durablePosition) {
+    if (target <= durablePosition) {
+      return;
+    }
+    // Rotation and close wait for forceInProgress to clear, so the channel stays open.
+    forceInProgress = true;
+    IOException failure = null;
+    syncLock.unlock();
+    try {
       ch.force(false);
       fsyncs.incrementAndGet();
-      durablePosition = target;
-      syncMonitor.notifyAll();
+    } catch (IOException e) {
+      failure = e;
+    } finally {
+      syncLock.lock();
+      forceInProgress = false;
+      if (failure == null) {
+        durablePosition = Math.max(durablePosition, target);
+      } else {
+        syncFailure = failure;
+      }
+      syncDone.signalAll();
+    }
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  // Caller holds syncLock.
+  private void awaitSyncDone() throws IOException {
+    try {
+      syncDone.await();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IOException("interrupted waiting for WAL fsync", e);
+    }
+  }
+
+  // Caller holds syncLock.
+  private void awaitNoForce() throws IOException {
+    while (forceInProgress) {
+      awaitSyncDone();
+    }
+  }
+
+  // Caller holds syncLock.
+  private void throwIfUnusable() throws IOException {
+    if (syncFailure != null) {
+      throw new IOException("WAL fsync failed earlier; durability is unknown", syncFailure);
+    }
+    if (isClosed()) {
+      throw new IOException("WAL closed before write became durable");
     }
   }
 
@@ -243,23 +315,27 @@ public final class WriteAheadLog implements AutoCloseable {
   @Override
   public void close() throws IOException {
     policy.stop();
-    synchronized (syncMonitor) {
+    syncLock.lock();
+    try {
+      awaitNoForce();
       writeLock.lock();
       try {
         if (closed) {
           return;
         }
-        if (policy.fsyncs()) {
+        if (policy.fsyncs() && syncFailure == null) {
           current.force(false);
           fsyncs.incrementAndGet();
         }
         durablePosition = appendedPosition;
         current.close();
         closed = true;
-        syncMonitor.notifyAll();
+        syncDone.signalAll();
       } finally {
         writeLock.unlock();
       }
+    } finally {
+      syncLock.unlock();
     }
   }
 
