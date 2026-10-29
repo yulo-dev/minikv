@@ -42,8 +42,8 @@ public final class SSTableReader implements AutoCloseable {
     if (fileBytes < SSTableFormat.FOOTER_BYTES) {
       throw new CorruptSSTableException(path, "file shorter than footer");
     }
-    ByteBuffer footer = read(fileBytes - SSTableFormat.FOOTER_BYTES, SSTableFormat.FOOTER_BYTES);
-    byte[] fb = footer.array();
+    byte[] fb = read(fileBytes - SSTableFormat.FOOTER_BYTES, SSTableFormat.FOOTER_BYTES);
+    ByteBuffer footer = ByteBuffer.wrap(fb);
     int footerCrc = ByteBuffer.wrap(fb, fb.length - 4, 4).getInt();
     if (SSTableFormat.crc(fb, 0, fb.length - 4) != footerCrc) {
       throw new CorruptSSTableException(path, "footer crc mismatch");
@@ -107,21 +107,22 @@ public final class SSTableReader implements AutoCloseable {
     if (offset < 0 || length < 0 || offset + length > fileBytes - SSTableFormat.FOOTER_BYTES) {
       throw new CorruptSSTableException(path, name + " block out of bounds");
     }
-    ByteBuffer buf = read(offset, length);
-    if (SSTableFormat.crc(buf.array(), 0, length) != crc) {
+    byte[] data = read(offset, length);
+    if (SSTableFormat.crc(data, 0, length) != crc) {
       throw new CorruptSSTableException(path, name + " block crc mismatch");
     }
-    return buf;
+    return ByteBuffer.wrap(data);
   }
 
-  private ByteBuffer read(long offset, int length) throws IOException {
-    ByteBuffer buf = ByteBuffer.allocate(length);
+  private byte[] read(long offset, int length) throws IOException {
+    byte[] data = new byte[length];
+    ByteBuffer buf = ByteBuffer.wrap(data);
     while (buf.hasRemaining()) {
       if (channel.read(buf, offset + buf.position()) < 0) {
         throw new CorruptSSTableException(path, "unexpected end of file");
       }
     }
-    return buf.flip();
+    return data;
   }
 
   /** Newest version of {@code key} in this table, including tombstones. */
@@ -165,11 +166,11 @@ public final class SSTableReader implements AutoCloseable {
   }
 
   private ByteBuffer readBlock(int i) throws IOException {
-    ByteBuffer data = read(offsets[i], lengths[i]);
-    if (SSTableFormat.crc(data.array(), 0, lengths[i]) != crcs[i]) {
+    byte[] data = read(offsets[i], lengths[i]);
+    if (SSTableFormat.crc(data, 0, lengths[i]) != crcs[i]) {
       throw new CorruptSSTableException(path, "data block " + i + " crc mismatch");
     }
-    return data;
+    return ByteBuffer.wrap(data);
   }
 
   private Entry decode(ByteBuffer b) throws CorruptSSTableException {

@@ -16,6 +16,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Random;
 import java.util.TreeMap;
 import org.junit.jupiter.api.Test;
@@ -32,10 +33,10 @@ class SSTableTest {
   }
 
   /** Even-numbered keys only, so odd keys are absent but inside the table's key range. */
-  private TreeMap<byte[], VersionedValue> sample(int n) {
+  private NavigableMap<byte[], VersionedValue> sample(int n) {
     TreeMap<byte[], VersionedValue> data = new TreeMap<>(Bytes.UNSIGNED);
     for (int i = 0; i < n; i++) {
-      long ts = 1 + rnd.nextInt(1_000_000);
+      long ts = 1L + rnd.nextInt(1_000_000);
       if (i % 7 == 0) {
         data.put(b(key(i * 2)), VersionedValue.tombstoneAt(ts));
       } else {
@@ -47,7 +48,7 @@ class SSTableTest {
     return data;
   }
 
-  private Path write(TreeMap<byte[], VersionedValue> data, int blockBytes) throws IOException {
+  private Path write(NavigableMap<byte[], VersionedValue> data, int blockBytes) throws IOException {
     Path file = dir.resolve("t.sst");
     try (SSTableWriter w = SSTableWriter.builder(file).blockBytes(blockBytes).open()) {
       for (Map.Entry<byte[], VersionedValue> e : data.entrySet()) {
@@ -60,7 +61,7 @@ class SSTableTest {
 
   @Test
   void pointLookupsReturnEveryEntryAndNothingElse() throws IOException {
-    TreeMap<byte[], VersionedValue> data = sample(5000);
+    NavigableMap<byte[], VersionedValue> data = sample(5000);
     try (SSTableReader r = SSTableReader.open(write(data, 256))) {
       assertThat(r.entryCount()).isEqualTo(5000L);
       assertThat(r.blockCount()).isGreaterThan(100);
@@ -89,7 +90,7 @@ class SSTableTest {
 
   @Test
   void rangeIteratorMatchesASortedMap() throws IOException {
-    TreeMap<byte[], VersionedValue> data = sample(2000);
+    NavigableMap<byte[], VersionedValue> data = sample(2000);
     try (SSTableReader r = SSTableReader.open(write(data, 512))) {
       assertThat(keys(r.iterator(null, null))).containsExactlyElementsOf(strings(data));
       for (int t = 0; t < 200; t++) {
@@ -128,7 +129,7 @@ class SSTableTest {
 
   @Test
   void corruptionIsDetectedNotReturned() throws IOException {
-    TreeMap<byte[], VersionedValue> data = sample(500);
+    NavigableMap<byte[], VersionedValue> data = sample(500);
     Path file = write(data, 256);
     byte[] original = Files.readAllBytes(file);
 

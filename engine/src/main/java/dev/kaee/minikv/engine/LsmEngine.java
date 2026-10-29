@@ -31,6 +31,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -203,13 +204,7 @@ final class LsmEngine implements Engine {
 
   // Back-pressure: stall writers while too many frozen memtables wait for flush.
   private void awaitFlushCapacity() {
-    synchronized (flushMonitor) {
-      while (state.immutables().size() >= config.maxImmutableMemtables()) {
-        checkFlushFailure();
-        ensureOpen();
-        waitForFlush();
-      }
-    }
+    awaitFlushes(() -> state.immutables().size() < config.maxImmutableMemtables());
   }
 
   private void maybeRotate() {
@@ -292,7 +287,7 @@ final class LsmEngine implements Engine {
     try {
       State s = state;
       List<Frozen> immutables = new ArrayList<>(s.immutables());
-      immutables.removeIf(f -> f == frozen);
+      immutables.removeIf(frozen::equals);
       List<SSTableReader> tables = new ArrayList<>(s.tables().size() + 1);
       tables.add(reader);
       tables.addAll(s.tables());
@@ -323,22 +318,23 @@ final class LsmEngine implements Engine {
       rotationLock.writeLock().unlock();
     }
     scheduleFlush();
-    synchronized (flushMonitor) {
-      while (!state.immutables().isEmpty()) {
-        checkFlushFailure();
-        ensureOpen();
-        waitForFlush();
-      }
-    }
+    awaitFlushes(() -> state.immutables().isEmpty());
   }
 
-  // Caller holds flushMonitor.
-  private void waitForFlush() {
-    try {
-      flushMonitor.wait();
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw new UncheckedIOException(new InterruptedIOException("interrupted waiting for flush"));
+  /** Blocks until {@code done} holds, rechecking after every flush. */
+  private void awaitFlushes(BooleanSupplier done) {
+    synchronized (flushMonitor) {
+      while (!done.getAsBoolean()) {
+        checkFlushFailure();
+        ensureOpen();
+        try {
+          flushMonitor.wait();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new UncheckedIOException(
+              new InterruptedIOException("interrupted waiting for flush"));
+        }
+      }
     }
   }
 

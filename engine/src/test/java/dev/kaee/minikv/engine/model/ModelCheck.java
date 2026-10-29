@@ -17,6 +17,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.stream.Stream;
@@ -100,7 +101,7 @@ public final class ModelCheck {
   }
 
   private static void checkGet(
-      Engine engine, TreeMap<String, VersionedValue> model, int k, String where) {
+      Engine engine, NavigableMap<String, VersionedValue> model, int k, String where) {
     Optional<VersionedValue> got = engine.get(bytes(key(k)));
     VersionedValue want = model.get(key(k));
     if (want == null) {
@@ -118,7 +119,7 @@ public final class ModelCheck {
   }
 
   private static void checkScan(
-      Engine engine, TreeMap<String, VersionedValue> model, int a, int b, String where) {
+      Engine engine, NavigableMap<String, VersionedValue> model, int a, int b, String where) {
     String from = key(Math.min(a, b));
     String to = key(Math.max(a, b));
     List<String> want = new ArrayList<>();
