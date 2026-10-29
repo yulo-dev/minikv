@@ -63,9 +63,19 @@ public final class WriteAheadLog implements AutoCloseable {
    * {@link WalReplay} first; recovered segments are never appended to.
    */
   public static WriteAheadLog open(Path dir, SyncPolicy policy) throws IOException {
+    return open(dir, policy, 0);
+  }
+
+  /**
+   * Like {@link #open(Path, SyncPolicy)}, but the new segment id is also greater than {@code
+   * retiredThrough}, so ids stay increasing after old segments are deleted.
+   */
+  public static WriteAheadLog open(Path dir, SyncPolicy policy, long retiredThrough)
+      throws IOException {
     Files.createDirectories(dir);
     List<Long> existing = listSegments(dir);
-    long next = existing.isEmpty() ? 1 : existing.get(existing.size() - 1) + 1;
+    long highest = existing.isEmpty() ? 0 : existing.get(existing.size() - 1);
+    long next = Math.max(highest, retiredThrough) + 1;
     WriteAheadLog wal = new WriteAheadLog(dir, policy, existing, next);
     policy.start(wal);
     return wal;
@@ -115,6 +125,31 @@ public final class WriteAheadLog implements AutoCloseable {
       } finally {
         writeLock.unlock();
       }
+    }
+  }
+
+  /**
+   * Deletes every closed segment with id {@code <= segmentId}. Call only after the manifest durably
+   * records that their data is in SSTables. The current segment is never deleted.
+   */
+  public void deleteSegmentsThrough(long segmentId) throws IOException {
+    List<Long> doomed = new ArrayList<>();
+    writeLock.lock();
+    try {
+      for (long id : liveSegments) {
+        if (id <= segmentId && id != currentId) {
+          doomed.add(id);
+        }
+      }
+      liveSegments.removeAll(doomed);
+    } finally {
+      writeLock.unlock();
+    }
+    for (long id : doomed) {
+      Files.deleteIfExists(segmentPath(dir, id));
+    }
+    if (!doomed.isEmpty()) {
+      FileSync.fsyncDirectory(dir);
     }
   }
 
