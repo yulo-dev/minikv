@@ -15,7 +15,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.ToLongFunction;
 import org.junit.jupiter.api.Test;
@@ -147,9 +146,9 @@ class CompactionTest {
   void readsStayCorrectWhileCompactionRuns() throws Exception {
     int keys = 300;
     try (Engine e = Engines.open(config().memtableFlushBytes(1024).build())) {
-      AtomicLong clock = new AtomicLong(1);
+      long clock = 1;
       for (int k = 0; k < keys; k++) {
-        e.put(b("k" + k), b("0"), clock.getAndIncrement());
+        e.put(b("k" + k), b("0"), clock++);
       }
       AtomicBoolean stop = new AtomicBoolean();
       ExecutorService pool = Executors.newFixedThreadPool(4);
@@ -180,7 +179,7 @@ class CompactionTest {
       int round = 0;
       while (System.nanoTime() < deadline) {
         for (int k = 0; k < keys; k++) {
-          e.put(b("k" + k), b(Integer.toString(round)), clock.getAndIncrement());
+          e.put(b("k" + k), b(Integer.toString(round)), clock++);
         }
         round++;
       }
